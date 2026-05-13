@@ -53,6 +53,7 @@ class Video2PPT:
         self.frames: List[str] = []  # Store frame paths
         self.frames_dir = None
         self.hash_threshold = 15  # 哈希差异阈值，>15保留，≤15丢弃
+        self.pixel_threshold = 30  # 像素差异阈值，>30直接保存，≤30走pHash
         self.last_hash = None     # 上一保留帧的哈希
         
         if not os.path.exists(video_path):
@@ -74,64 +75,87 @@ class Video2PPT:
             logger.warning(f"Failed to compute hash for {image_path}: {e}")
             return None
 
-    def extract_frames(self) -> None:
-        """Extract frames from video"""
+    def extract_frames(self) -> List[str]:
+        """提帧阶段：快速预过滤 + 精确去重"""
         logger.info("Starting frame extraction...")
-        
-        # Create temporary directory to store frames
+
         self.frames_dir = "temp_frames"
         os.makedirs(self.frames_dir, exist_ok=True)
-        
-        # Open video file
+
         cap = cv2.VideoCapture(self.video_path)
-        
+
         if not cap.isOpened():
             raise ValueError(f"Unable to open video file: {self.video_path}")
-        
+
         fps = cap.get(cv2.CAP_PROP_FPS)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         duration = total_frames / fps if fps > 0 else 0
-        
+
         logger.info(f"Video info - FPS: {fps:.2f}, Total frames: {total_frames}, Duration: {duration:.2f}s")
-        
+
         frame_interval = int(fps * self.fps_interval)
         frame_count = 0
         extracted_count = 0
-        
+        last_frame = None  # 上一帧的numpy数组
+
         while True:
             ret, frame = cap.read()
-            
+
             if not ret:
                 break
-            
-            # Extract frames at specified intervals
+
             if frame_count % frame_interval == 0:
                 frame_path = os.path.join(self.frames_dir, f"frame_{extracted_count:04d}.jpg")
-                cv2.imwrite(frame_path, frame)
 
-                # 计算当前帧哈希并与上一保留帧比较
-                current_hash = self._compute_frame_hash(frame_path)
-                if current_hash is not None:
-                    if self.last_hash is None or abs(current_hash - self.last_hash) > self.hash_threshold:
+                if last_frame is not None:
+                    # 快速像素差异比较
+                    diff = np.mean(np.abs(frame.astype(float) - last_frame.astype(float)))
+
+                    if diff > self.pixel_threshold:
+                        # 差异大，直接保存
+                        cv2.imwrite(frame_path, frame)
                         self.frames.append(frame_path)
-                        self.last_hash = current_hash
+                        self.last_hash = self._compute_frame_hash(frame_path)
                         extracted_count += 1
+                        logger.debug(f"Frame {extracted_count}: diff={diff:.2f}, direct save")
                     else:
-                        logger.debug(f"Frame skipped (similar to previous): {frame_path}")
+                        # 疑似相似，先保存帧再pHash精确比较
+                        cv2.imwrite(frame_path, frame)
+                        current_hash = self._compute_frame_hash(frame_path)
+                        if current_hash is not None:
+                            if self.last_hash is None or \
+                               abs(current_hash - self.last_hash) > self.hash_threshold:
+                                self.frames.append(frame_path)
+                                self.last_hash = current_hash
+                                extracted_count += 1
+                                logger.debug(f"Frame {extracted_count}: diff={diff:.2f}, pHash save")
+                            else:
+                                # 相似，跳过（已写入的帧会在cleanup时被删除）
+                                logger.debug(f"Frame skipped (similar): diff={diff:.2f}")
+                                extracted_count += 1
+                        else:
+                            # pHash计算失败，保存帧
+                            self.frames.append(frame_path)
+                            self.last_hash = None
+                            extracted_count += 1
                 else:
-                    # 哈希计算失败时保留帧
+                    # 第一帧，直接保存
+                    cv2.imwrite(frame_path, frame)
                     self.frames.append(frame_path)
-                    self.last_hash = None
+                    self.last_hash = self._compute_frame_hash(frame_path)
                     extracted_count += 1
-                
+
+                last_frame = frame.copy()
+
                 if extracted_count % 10 == 0:
                     logger.info(f"Extracted {extracted_count} frames")
-            
+
             frame_count += 1
-        
+
         cap.release()
         logger.info(f"Frame extraction complete. Total frames extracted: {extracted_count}")
-    
+        return self.frames
+
     def generate_ppt(self) -> None:
         """Generate PowerPoint presentation"""
         logger.info("Starting PowerPoint generation...")
@@ -144,16 +168,6 @@ class Video2PPT:
         prs = Presentation()
         prs.slide_width = Inches(10)
         prs.slide_height = Inches(7.5)
-        
-        # Add title slide
-        title_slide_layout = prs.slide_layouts[0]
-        slide = prs.slides.add_slide(title_slide_layout)
-        title = slide.shapes.title
-        subtitle = slide.placeholders[1]
-        
-        title.text = "Video2PPT"
-        subtitle.text = f"Conversion time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n" \
-                       f"Source file: {os.path.basename(self.video_path)}"
         
         # Add frame slides
         blank_slide_layout = prs.slide_layouts[6]  # Blank layout
@@ -182,7 +196,7 @@ class Video2PPT:
             logger.info("Temporary files cleaned up")
     
     def convert(self) -> None:
-        """Execute full conversion process"""
+        """完整转换流程：提帧(含去重) -> 生成PPT"""
         try:
             self.extract_frames()
             self.generate_ppt()
