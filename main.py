@@ -29,20 +29,26 @@ except ImportError as e:
 
 
 # Configure logging
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "video2ppt.log")
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding='utf-8'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
 
 class Video2PPT:
     """Video to PPT converter"""
-    
+
     def __init__(self, video_path: str, output_path: str = None, fps_interval: int = 1):
         """
         Initialize converter
-        
+
         Args:
             video_path: Path to input video file
             output_path: Path to output PPT file
@@ -55,17 +61,17 @@ class Video2PPT:
         self.hash_threshold = 15  # 哈希差异阈值，>15保留，≤15丢弃
         self.pixel_threshold = 30  # 像素差异阈值，>30直接保存，≤30走pHash
         self.last_hash = None     # 上一保留帧的哈希
-        
+
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video file not found: {video_path}")
-        
+
         if output_path is None:
             base_name = Path(video_path).stem
             output_path = f"{base_name}_output.pptx"
-        
+
         self.output_path = output_path
         logger.info(f"Initializing converter: {video_path} -> {output_path}")
-    
+
     def _compute_frame_hash(self, image_path: str) -> imagehash.ImageHash:
         """计算单帧的感知哈希"""
         try:
@@ -79,7 +85,8 @@ class Video2PPT:
         """提帧阶段：快速预过滤 + 精确去重"""
         logger.info("Starting frame extraction...")
 
-        self.frames_dir = "temp_frames"
+        video_stem = Path(self.video_path).stem
+        self.frames_dir = f"{video_stem}_frames"
         os.makedirs(self.frames_dir, exist_ok=True)
 
         cap = cv2.VideoCapture(self.video_path)
@@ -159,42 +166,42 @@ class Video2PPT:
     def generate_ppt(self) -> None:
         """Generate PowerPoint presentation"""
         logger.info("Starting PowerPoint generation...")
-        
+
         if not self.frames:
             logger.error("No frame data available")
             return
-        
+
         # Create presentation
         prs = Presentation()
         prs.slide_width = Inches(10)
         prs.slide_height = Inches(7.5)
-        
+
         # Add frame slides
         blank_slide_layout = prs.slide_layouts[6]  # Blank layout
-        
+
         for idx, frame_path in enumerate(self.frames, 1):
             logger.info(f"Processing slide {idx}/{len(self.frames)}...")
-            
+
             slide = prs.slides.add_slide(blank_slide_layout)
-            
+
             # Add frame image, fill entire slide (edge-aligned)
             left = Inches(0)
             top = Inches(0)
             width = Inches(10)     # Slide width
             height = Inches(7.5)   # Slide height
             pic = slide.shapes.add_picture(frame_path, left, top, width=width, height=height)
-        
+
         # Save presentation
         prs.save(self.output_path)
         logger.info(f"PowerPoint saved: {self.output_path}")
-    
+
     def cleanup(self) -> None:
         """Clean up temporary files"""
         if self.frames_dir and os.path.exists(self.frames_dir):
             import shutil
             shutil.rmtree(self.frames_dir)
             logger.info("Temporary files cleaned up")
-    
+
     def convert(self) -> None:
         """完整转换流程：提帧(含去重) -> 生成PPT"""
         try:
@@ -220,14 +227,14 @@ Examples:
   python main.py input_video.mp4 -i 2  (extract one frame every 2 seconds)
         """
     )
-    
+
     parser.add_argument('video', help='Path to input video file')
     parser.add_argument('-o', '--output', help='Path to output PPT file (default: input_output.pptx)')
     parser.add_argument('-i', '--interval', type=int, default=1,
                        help='Frame extraction interval in seconds (default: 1)')
-    
+
     args = parser.parse_args()
-    
+
     try:
         converter = Video2PPT(args.video, args.output, args.interval)
         converter.convert()
