@@ -11,16 +11,13 @@ import cv2
 import argparse
 import logging
 from pathlib import Path
-from typing import List, Tuple
+from typing import List
 import numpy as np
-from datetime import datetime
 
 try:
     from PIL import Image
     from pptx import Presentation
-    from pptx.util import Inches, Pt
-    from pptx.enum.text import PP_ALIGN
-    from pptx.dml.color import RGBColor
+    from pptx.util import Inches
     import imagehash
 except ImportError as e:
     print(f"Error: Missing required library - {e}")
@@ -72,17 +69,19 @@ class Video2PPT:
         self.output_path = output_path
         logger.info(f"Initializing converter: {video_path} -> {output_path}")
 
-    def _compute_frame_hash(self, image_path: str) -> imagehash.ImageHash:
-        """计算单帧的感知哈希"""
+    def _compute_hash_from_array(self, frame) -> imagehash.ImageHash:
+        """从numpy数组计算感知哈希（不写盘）"""
         try:
-            img = Image.open(image_path)
+            # BGR→RGB + PIL Image
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(rgb)
             return imagehash.phash(img)
         except Exception as e:
-            logger.warning(f"Failed to compute hash for {image_path}: {e}")
+            logger.warning(f"Failed to compute hash from array: {e}")
             return None
 
     def extract_frames(self) -> List[str]:
-        """提帧阶段：快速预过滤 + 精确去重"""
+        """提帧阶段：先算pHash，通过再写盘，避免无用I/O"""
         logger.info("Starting frame extraction...")
 
         video_stem = Path(self.video_path).stem
@@ -119,29 +118,34 @@ class Video2PPT:
                     diff = np.mean(np.abs(frame.astype(float) - last_frame.astype(float)))
 
                     if diff > self.pixel_threshold:
-                        # 差异大，直接保存
-                        cv2.imwrite(frame_path, frame)
-                        self.frames.append(frame_path)
-                        self.last_hash = self._compute_frame_hash(frame_path)
-                        extracted_count += 1
-                        logger.debug(f"Frame {extracted_count}: diff={diff:.2f}, direct save")
+                        # 差异大，直接算pHash，通过再写盘
+                        current_hash = self._compute_hash_from_array(frame)
+                        if current_hash is None or self.last_hash is None or \
+                           abs(current_hash - self.last_hash) > self.hash_threshold:
+                            cv2.imwrite(frame_path, frame)
+                            self.frames.append(frame_path)
+                            self.last_hash = current_hash if current_hash is not None else None
+                            extracted_count += 1
+                            logger.debug(f"Frame {extracted_count}: diff={diff:.2f}, direct save")
+                        else:
+                            logger.debug(f"Frame skipped (similar): diff={diff:.2f}")
                     else:
-                        # 疑似相似，先保存帧再pHash精确比较
-                        cv2.imwrite(frame_path, frame)
-                        current_hash = self._compute_frame_hash(frame_path)
+                        # 疑似相似，先在内存中算pHash精确比较
+                        current_hash = self._compute_hash_from_array(frame)
                         if current_hash is not None:
                             if self.last_hash is None or \
                                abs(current_hash - self.last_hash) > self.hash_threshold:
+                                cv2.imwrite(frame_path, frame)
                                 self.frames.append(frame_path)
                                 self.last_hash = current_hash
                                 extracted_count += 1
                                 logger.debug(f"Frame {extracted_count}: diff={diff:.2f}, pHash save")
                             else:
-                                # 相似，跳过（已写入的帧会在cleanup时被删除）
+                                # 相似，跳过
                                 logger.debug(f"Frame skipped (similar): diff={diff:.2f}")
-                                extracted_count += 1
                         else:
                             # pHash计算失败，保存帧
+                            cv2.imwrite(frame_path, frame)
                             self.frames.append(frame_path)
                             self.last_hash = None
                             extracted_count += 1
@@ -149,10 +153,10 @@ class Video2PPT:
                     # 第一帧，直接保存
                     cv2.imwrite(frame_path, frame)
                     self.frames.append(frame_path)
-                    self.last_hash = self._compute_frame_hash(frame_path)
+                    self.last_hash = self._compute_hash_from_array(frame)
                     extracted_count += 1
 
-                last_frame = frame.copy()
+                last_frame = frame
 
                 if extracted_count % 10 == 0:
                     logger.info(f"Extracted {extracted_count} frames")
