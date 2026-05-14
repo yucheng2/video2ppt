@@ -42,8 +42,8 @@ class TestFrameExtraction:
 
     def test_extract_frames_increments_extracted_count(self, small_video, temp_dir):
         converter = Video2PPT(small_video, os.path.join(temp_dir, "out.pptx"))
-        converter.extract_frames()
-        assert converter.last_hash is not None
+        frames = converter.extract_frames()
+        assert len(frames) > 0
 
 
 class TestConversion:
